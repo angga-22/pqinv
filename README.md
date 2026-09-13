@@ -1,5 +1,11 @@
 # pqinv — post-quantum crypto inventory
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/angga-22/pqinv.svg)](https://pkg.go.dev/github.com/angga-22/pqinv)
+[![Go Report Card](https://goreportcard.com/badge/github.com/angga-22/pqinv)](https://goreportcard.com/report/github.com/angga-22/pqinv)
+[![Release](https://img.shields.io/github/v/release/angga-22/pqinv)](https://github.com/angga-22/pqinv/releases)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/angga-22/pqinv)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **The PQ readiness scanner for identity infrastructure.** pqinv inventories the cryptography a system *actually uses* — OIDC/JWKS signing keys, TLS handshakes, certificate chains, source code — classifies every finding against the NIST post-quantum migration timeline, and tells you what to do about it. Point it at a Keycloak realm and learn whether your identity platform is quantum-ready.
 
 ```
