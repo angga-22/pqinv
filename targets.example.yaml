@@ -1,0 +1,11 @@
+# Example config for `pqinv scan all --config targets.yaml`.
+# Copy, rename to targets.yaml, and point at your own systems.
+targets:
+  - probe: tls
+    target: cloudflare.com:443
+  - probe: tls
+    target: github.com:443
+  - probe: oidc
+    target: https://id.example.com/realms/main
+  - probe: repo
+    target: .

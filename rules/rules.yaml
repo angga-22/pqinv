@@ -1,0 +1,242 @@
+# pqinv classification knowledge base.
+#
+# The classifier walks this list top to bottom and the FIRST matching
+# rule wins, so order runs from most specific to most general — e.g. the
+# "RSA below 2048 bits" rule must sit above the general RSA rules.
+# Adding an algorithm is a YAML edit plus a table test, never a code
+# change. Anything no rule matches is classified Unknown/Medium in code,
+# so a finding can never be silently dropped.
+#
+# match fields:
+#   algorithms      glob patterns (Go path.Match syntax) over CryptoAsset.Algorithm
+#   usages          optional list; empty means any usage
+#   key_bits_below  matches only when 0 < KeyBits < this value
+#
+# Writing style for rationale/migration: lead with the fact, one or two
+# short sentences, no hedging. The rationale says why it matters; the
+# migration says what to do.
+
+rules:
+  # ── already post-quantum ────────────────────────────────────────────
+  - name: hybrid-pq-key-exchange
+    match:
+      algorithms: ["X25519MLKEM768"]
+      usages: [KeyExchange]
+    class: Hybrid
+    urgency: None
+    rationale: >-
+      X25519 paired with ML-KEM-768 (FIPS 203). An attacker has to break
+      both, so traffic recorded today stays sealed even after quantum
+      computers arrive.
+    migration: None — this is the current gold standard for TLS key exchange.
+    references: ["FIPS 203", "draft-ietf-tls-ecdhe-mlkem"]
+
+  - name: pure-post-quantum
+    match:
+      algorithms: ["ML-KEM*", "ML-DSA*", "SLH-DSA*"]
+    class: PQSafe
+    urgency: None
+    rationale: NIST-standardized post-quantum cryptography (FIPS 203/204/205).
+    migration: None.
+    references: ["FIPS 203", "FIPS 204", "FIPS 205"]
+
+  # ── broken or deprecated today, quantum aside ───────────────────────
+  - name: legacy-tls-protocol
+    match:
+      algorithms: ["TLS 1.0", "TLS 1.1"]
+      usages: [Protocol]
+    class: WeakClassical
+    urgency: High
+    rationale: >-
+      Deprecated by RFC 8996 since 2021: weak hashes, no AEAD ciphers, a
+      standing downgrade target. Broken by classical means — no quantum
+      computer required.
+    migration: >-
+      Turn off TLS 1.0/1.1. Require 1.2, prefer 1.3 — PQ key exchange
+      only exists in 1.3.
+    references: ["RFC 8996"]
+
+  - name: broken-hash
+    match:
+      algorithms: ["MD5*", "SHA-1*", "SHA1*"]
+    class: WeakClassical
+    urgency: High
+    rationale: >-
+      Collisions are practical on commodity hardware — MD5 since 2004,
+      SHA-1 since 2017 (SHAttered).
+    migration: Move to SHA-256 or SHA-3 now.
+    references: ["NIST SP 800-131A"]
+
+  - name: broken-symmetric
+    match:
+      algorithms: ["DES*", "3DES*", "RC4*", "TripleDES*"]
+    class: WeakClassical
+    urgency: High
+    rationale: >-
+      Broken ciphers: DES falls to brute force, RC4 to keystream biases,
+      3DES to Sweet32.
+    migration: Replace with AES-256-GCM or ChaCha20-Poly1305.
+    references: ["NIST SP 800-131A"]
+
+  - name: rsa-below-2048
+    match:
+      algorithms: ["RSA*", "RS*", "PS*"]
+      key_bits_below: 2048
+    class: WeakClassical
+    urgency: High
+    rationale: >-
+      Below the classical security floor (NIST SP 800-57). Keys this
+      size are factorable with rented compute — quantum is beside the
+      point.
+    migration: >-
+      Rotate to RSA-3072 or ECDSA P-256 today; plan ML-DSA (FIPS 204)
+      for the transition.
+    references: ["NIST SP 800-57"]
+
+  - name: unsigned-tokens-advertised
+    match:
+      algorithms: ["none"]
+    class: WeakClassical
+    urgency: Medium
+    rationale: >-
+      The IdP advertises alg "none" — one misconfigured client away from
+      accepting forged, unsigned tokens.
+    migration: >-
+      Audit client registrations for alg "none"; disable unsigned tokens
+      at the IdP if possible.
+    references: ["RFC 8725 §3.1"]
+
+  # ── key exchange & encryption: harvest-now-decrypt-later ────────────
+  - name: classical-ecdh-key-exchange
+    match:
+      algorithms: ["X25519", "P-256", "P-384", "P-521", "ECDH*"]
+      usages: [KeyExchange]
+    class: Vulnerable
+    urgency: High
+    rationale: >-
+      Shor's algorithm breaks ECDH outright — and key exchange can't
+      wait for that day: traffic recorded now gets decrypted the day a
+      large enough quantum computer boots. Harvest now, decrypt later.
+    migration: >-
+      Turn on X25519MLKEM768 — already the default in Go 1.24+, OpenSSL
+      3.5+, Chrome and Firefox.
+    references: ["NIST IR 8547", "FIPS 203"]
+
+  - name: classical-rsa-dh-key-exchange
+    match:
+      algorithms: ["RSA*", "DHE*", "DH*"]
+      usages: [KeyExchange]
+    class: Vulnerable
+    urgency: High
+    rationale: >-
+      RSA key transport and finite-field DH fall to Shor's algorithm,
+      and every recorded session is decryptable retroactively.
+    migration: Move to TLS 1.3 with hybrid X25519MLKEM768.
+    references: ["NIST IR 8547"]
+
+  - name: rsa-jose-encryption
+    match:
+      algorithms: ["RSA-OAEP*", "RSA1_5"]
+      usages: [Encryption]
+    class: Vulnerable
+    urgency: High
+    rationale: >-
+      Shor's algorithm opens RSA-encrypted tokens — including every one
+      captured and stored in the meantime. Harvest-now-decrypt-later is
+      not just a TLS problem.
+    migration: >-
+      No PQ JOSE encryption standard yet. Keep encrypted-token lifetimes
+      short and watch the HPKE/ML-KEM drafts.
+    references: ["NIST IR 8547", "draft-ietf-jose-hpke-encrypt"]
+
+  # ── signatures: vulnerable, but not retroactively forgeable ─────────
+  - name: classical-jose-signature
+    match:
+      algorithms:
+        ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512",
+         "ES256", "ES384", "ES512", "EdDSA"]
+      usages: [Signature]
+    class: Vulnerable
+    urgency: Medium
+    rationale: >-
+      Shor's algorithm will forge these token signatures — eventually.
+      Unlike key exchange there is no retroactive harm: tokens expire
+      long before the threat matures. Plan, don't panic.
+    migration: >-
+      No standardized PQ JOSE algorithm exists yet (ML-DSA for JOSE is
+      an IETF draft). Inventory now, migrate when the ecosystem ships.
+    references: ["FIPS 204", "draft-ietf-cose-dilithium", "NIST IR 8547"]
+
+  - name: classical-signature-key
+    match:
+      algorithms: ["RSA", "ECDSA*", "Ed25519", "DSA*"]
+      usages: [Signature]
+    class: Vulnerable
+    urgency: Medium
+    rationale: >-
+      A quantum computer will forge RSA/ECDSA signatures — but not
+      yesterday's. The deadline is NIST's, not physics': deprecated
+      after 2030, disallowed after 2035.
+    migration: >-
+      Track CA support for ML-DSA (FIPS 204) certificates and budget the
+      rotation before 2030.
+    references: ["FIPS 204", "NIST IR 8547"]
+
+  # ── symmetric cryptography: Grover, not Shor ────────────────────────
+  - name: hmac
+    match:
+      algorithms: ["HS256", "HS384", "HS512", "HMAC*"]
+    class: Acceptable
+    urgency: Low
+    rationale: >-
+      Symmetric — Shor doesn't apply, and Grover's speedup still leaves
+      HS256 with ~128-bit security.
+    migration: Fine through the transition. Keep MAC keys at 256 bits or more.
+    references: ["NIST IR 8547"]
+
+  - name: aes-128
+    match:
+      algorithms: ["*AES_128*", "AES-128*", "AES128*"]
+    class: Acceptable
+    urgency: Low
+    rationale: >-
+      Grover halves the exponent: AES-128 becomes a 2^64 quantum search.
+      Nobody can run one, but AES-256 removes the asterisk.
+    migration: Prefer AES-256-GCM going forward.
+    references: ["NIST IR 8547"]
+
+  - name: strong-symmetric
+    match:
+      algorithms: ["*AES_256*", "AES-256*", "AES256*", "*CHACHA20*"]
+    class: Acceptable
+    urgency: None
+    rationale: >-
+      256-bit symmetric keys keep at least 128-bit security even against
+      Grover.
+    migration: None.
+    references: ["NIST IR 8547"]
+
+  # ── modern protocols ────────────────────────────────────────────────
+  - name: tls13
+    match:
+      algorithms: ["TLS 1.3"]
+      usages: [Protocol]
+    class: Acceptable
+    urgency: None
+    rationale: >-
+      AEAD-only, modern handshake — and the only TLS version that can
+      negotiate PQ key exchange.
+    migration: None.
+    references: ["RFC 8446"]
+
+  - name: tls12
+    match:
+      algorithms: ["TLS 1.2"]
+      usages: [Protocol]
+    class: Acceptable
+    urgency: Low
+    rationale: >-
+      Solid with ECDHE and AEAD, but it can never negotiate PQ key
+      exchange — that door only exists in TLS 1.3.
+    migration: Prefer TLS 1.3.
+    references: ["RFC 8446"]

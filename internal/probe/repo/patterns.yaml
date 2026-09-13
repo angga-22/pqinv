@@ -1,0 +1,67 @@
+# Static crypto-usage patterns for the repo probe. Regex over source is
+# honestly good enough for v1 (AST-based Go analysis is a future issue).
+#
+# fields:
+#   regex      RE2 syntax; matched per line
+#   algorithm  emitted CryptoAsset.Algorithm — must speak the same
+#              vocabulary as rules/rules.yaml; empty means "use the
+#              matched text itself" (for literals like RS256/ES384)
+#   usage      KeyExchange | Signature | Encryption | Hash
+
+patterns:
+  # Go stdlib imports
+  - name: go-import-rsa
+    regex: '"crypto/rsa"'
+    algorithm: RSA
+    usage: Signature
+  - name: go-import-ecdsa
+    regex: '"crypto/ecdsa"'
+    algorithm: ECDSA
+    usage: Signature
+  - name: go-import-ed25519
+    regex: '"crypto/ed25519"'
+    algorithm: Ed25519
+    usage: Signature
+  - name: go-import-md5
+    regex: '"crypto/md5"'
+    algorithm: MD5
+    usage: Hash
+  - name: go-import-sha1
+    regex: '"crypto/sha1"'
+    algorithm: SHA-1
+    usage: Hash
+  - name: go-import-des
+    regex: '"crypto/des"'
+    algorithm: DES
+    usage: Encryption
+  - name: go-import-rc4
+    regex: '"crypto/rc4"'
+    algorithm: RC4
+    usage: Encryption
+
+  # Language-agnostic literals
+  - name: jose-alg-literal
+    regex: '\b(RS|PS|ES)(256|384|512)\b'
+    usage: Signature
+  - name: md5-literal
+    regex: '\b(md5|MD5)\b'
+    algorithm: MD5
+    usage: Hash
+  - name: sha1-literal
+    regex: '\b(sha1|SHA-?1)\b'
+    algorithm: SHA-1
+    usage: Hash
+  - name: rc4-literal
+    regex: '\bRC4\b'
+    algorithm: RC4
+    usage: Encryption
+
+  # Key material committed to the repo
+  - name: rsa-private-key-pem
+    regex: 'BEGIN RSA PRIVATE KEY'
+    algorithm: RSA
+    usage: Signature
+  - name: ec-private-key-pem
+    regex: 'BEGIN EC PRIVATE KEY'
+    algorithm: ECDSA
+    usage: Signature
