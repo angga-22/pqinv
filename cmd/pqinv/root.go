@@ -1,8 +1,14 @@
 package main
 
-import "github.com/spf13/cobra"
+import (
+	"runtime/debug"
+
+	"github.com/spf13/cobra"
+)
 
 // version is stamped by goreleaser via -ldflags "-X main.version=…".
+// Binaries built by `go install …@v0.1.0` skip ldflags, so fall back to
+// the module version Go embeds in the build info.
 var version = "dev"
 
 var rootCmd = &cobra.Command{
@@ -19,5 +25,10 @@ timeline (FIPS 203/204, NIST IR 8547).`,
 }
 
 func init() {
+	if version == "dev" {
+		if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+			version = bi.Main.Version
+		}
+	}
 	rootCmd.Version = version
 }
