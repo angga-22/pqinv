@@ -35,13 +35,18 @@ jobs:
       - run: go build ./...
 
   vuln:
+    # Runs on the latest stable Go, not the go.mod floor: standard-library
+    # advisories are fixed by patch releases of the toolchain (1.26.0 has
+    # a net/http bug fixed in 1.26.9), and users build with a current
+    # toolchain. What this job guards is the dependency set.
     name: govulncheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: stable
+          check-latest: true
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   dogfood:
