@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -22,6 +24,15 @@ var patternsYAML []byte
 const (
 	maxFileSize = 2 << 20 // skip files >2MB: generated bundles, not source
 	sniffLen    = 8192    // bytes checked for NUL to detect binaries
+
+	// IgnoreFile, read from the scanned root, lists paths the probe must
+	// not scan: one glob per line in Go path.Match syntax, `#` comments
+	// and blank lines ignored. A pattern without a slash is matched
+	// against the base name of every entry (so `*_test.go` works at any
+	// depth); a pattern with a slash is matched against the full
+	// slash-separated path relative to the root. A trailing `/` restricts
+	// the pattern to directories, which are then pruned whole.
+	IgnoreFile = ".pqinvignore"
 )
 
 var skipDirs = map[string]bool{
@@ -95,14 +106,25 @@ func (p *Probe) Scan(ctx context.Context, target string) ([]model.CryptoAsset, e
 	if !info.IsDir() {
 		return nil, fmt.Errorf("%s is not a directory", target)
 	}
+	ignores, err := loadIgnore(root)
+	if err != nil {
+		return nil, err
+	}
 
 	var assets []model.CryptoAsset
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(root, func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // unreadable entry: skip, don't abort
 		}
+		if name == root {
+			return nil
+		}
+		rel, err := filepath.Rel(root, name)
+		if err != nil {
+			rel = name
+		}
 		if d.IsDir() {
-			if path != root && (skipDirs[d.Name()] || strings.HasPrefix(d.Name(), ".")) {
+			if skipDirs[d.Name()] || strings.HasPrefix(d.Name(), ".") || ignored(ignores, rel, true) {
 				return fs.SkipDir
 			}
 			return nil
@@ -110,19 +132,15 @@ func (p *Probe) Scan(ctx context.Context, target string) ([]model.CryptoAsset, e
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if skipExts[strings.ToLower(filepath.Ext(path))] {
+		if skipExts[strings.ToLower(filepath.Ext(name))] || ignored(ignores, rel, false) {
 			return nil
 		}
 		if fi, err := d.Info(); err != nil || fi.Size() > maxFileSize {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(name)
 		if err != nil || isBinary(data) {
 			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			rel = path
 		}
 		assets = append(assets, p.scanFile(rel, data)...)
 		return nil
@@ -171,6 +189,55 @@ func (p *Probe) scanFile(rel string, data []byte) []model.CryptoAsset {
 		}
 	}
 	return assets
+}
+
+// loadIgnore reads the root's IgnoreFile. A missing file means no
+// excludes; a malformed pattern is an error, because a typo that
+// silently excludes nothing (or everything) is the wrong failure mode.
+func loadIgnore(root string) ([]string, error) {
+	data, err := os.ReadFile(filepath.Join(root, IgnoreFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", IgnoreFile, err)
+	}
+	var globs []string
+	for i, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if _, err := path.Match(strings.TrimSuffix(line, "/"), ""); err != nil {
+			return nil, fmt.Errorf("%s line %d: bad pattern %q: %w", IgnoreFile, i+1, line, err)
+		}
+		globs = append(globs, line)
+	}
+	return globs, nil
+}
+
+func ignored(globs []string, rel string, isDir bool) bool {
+	if len(globs) == 0 {
+		return false
+	}
+	rel = filepath.ToSlash(rel)
+	base := path.Base(rel)
+	for _, g := range globs {
+		dirOnly := strings.HasSuffix(g, "/")
+		if dirOnly && !isDir {
+			continue
+		}
+		g = strings.TrimSuffix(g, "/")
+		if ok, _ := path.Match(g, rel); ok {
+			return true
+		}
+		if !strings.Contains(g, "/") {
+			if ok, _ := path.Match(g, base); ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isBinary(data []byte) bool {

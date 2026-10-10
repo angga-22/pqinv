@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: go.mod floor
+            go: ""          # empty → setup-go falls back to go-version-file
+          - name: stable
+            go: stable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "unformatted files:"; echo "$out"; exit 1; fi
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: go build ./...
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  dogfood:
+    # pqinv scanning pqinv: every probe that works offline, every output
+    # format, and the CI gate itself.
+    name: dogfood
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -o pqinv ./cmd/pqinv
+      - name: repo scan, all formats
+        run: |
+          ./pqinv scan repo . --format pretty
+          ./pqinv scan repo . --format json --out report.json
+          ./pqinv scan repo . --format cbom --out report.cbom.json
+          python3 -m json.tool report.json > /dev/null
+          python3 -m json.tool report.cbom.json > /dev/null
+      - name: gate trips on unreachable target
+        run: |
+          cat > targets.yaml <<'YAML'
+          targets:
+            - probe: tls
+              target: 127.0.0.1:1
+          YAML
+          if ./pqinv scan all --config targets.yaml --fail-on high --format json; then
+            echo "gate must fail on an unreachable target"; exit 1
+          fi

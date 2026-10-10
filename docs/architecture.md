@@ -148,9 +148,11 @@ Fetches `{issuer}/.well-known/openid-configuration`, then `jwks_uri`, and emits 
 1. **Published keys** (JWKS, parsed with `jwx/v2`): live exposure, with real key sizes from the key material. Keycloak's `use: "enc"` RSA-OAEP keys become `Encryption` assets — encrypted tokens are harvestable ciphertext, so they classify High.
 2. **Advertised algorithms** (`id_token_signing_alg_values_supported`): capability findings, including `alg: none` — one misconfigured client away from forged tokens.
 
+The HTTP client honours `--ca-file` (PEM bundle appended to the system roots) and `--insecure`, because real IdPs sit behind private CAs. The TLS probe ignores both: it never verifies.
+
 ### Repo — regex, on purpose
 
-`filepath.WalkDir` + embedded `patterns.yaml` (Go crypto imports, JOSE literals, committed PEM keys) → assets at `file.go:42`. Overlapping matches dedupe per `(line, algorithm)`. Binaries (NUL sniff), files >2MB, junk dirs, and doc/markup extensions are skipped — prose saying "we migrated off MD5" is not a finding, but YAML/JSON configs stay in scope because a realm export naming RS256 is live configuration. Regex can't tell comments from code; that's the documented v1 trade-off (AST analysis is future work).
+`filepath.WalkDir` + embedded `patterns.yaml` (Go crypto imports, JOSE literals, committed PEM keys) → assets at `file.go:42`. Overlapping matches dedupe per `(line, algorithm)`. Binaries (NUL sniff), files >2MB, junk dirs, and doc/markup extensions are skipped — prose saying "we migrated off MD5" is not a finding, but YAML/JSON configs stay in scope because a realm export naming RS256 is live configuration. A `.pqinvignore` at the root (one `path.Match` glob per line; no slash matches the base name at any depth, trailing slash means directories only) excludes paths — pqinv's own excludes `rules.yaml`, `patterns.yaml`, and `*_test.go`, which name every algorithm the tool knows. Committed private keys (PEM, PKCS#8, OpenSSH) get a distinct algorithm label (`RSA private key`, not `RSA`) so a dedicated High rule can tell a leaked key from an import. Regex can't tell comments from code; that's the documented v1 trade-off (AST analysis is future work).
 
 ## Classification
 
@@ -177,7 +179,7 @@ Grades: A ≥90, B ≥75, C ≥50, D ≥30, else F. The caps exist because real 
 All renderers consume the same `[]TargetReport` (probe, target, error, score, grade, verdicts), so `--format pretty|json|cbom` are interchangeable:
 
 - **pretty** — lipgloss, findings grouped HIGH → OK; rationale dim, migration line bold: the *why* whispers, the *fix* shouts. Renderer is created per-writer so `--out file` gets plain text automatically.
-- **json** — `TargetReport` is the public schema; treat field names as API. `[]` never `null`, no timestamp.
+- **json** — `TargetReport` is the public schema; treat field names as API. Every result carries `status: ok|unreachable`; an unreachable target has `error` and no `score`/`grade`, so a zero can never be mistaken for an F. `[]` never `null`, no timestamp.
 - **cbom** — CycloneDX 1.6, one `cryptographic-asset` component per verdict, pqinv's classification in `pqinv:*` properties. Uses plain `Encode` with a manual 1.6 stamp because cyclonedx-go v0.12.0's version converter drops the crypto typing (`supportsComponentType` lacks a `cryptographic-asset` case); a regression test guards this.
 
 ## Orchestration and the CI gate

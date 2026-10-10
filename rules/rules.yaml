@@ -40,6 +40,21 @@ rules:
     migration: None.
     references: ["FIPS 203", "FIPS 204", "FIPS 205"]
 
+  # ── key material in source control ──────────────────────────────────
+  - name: committed-private-key
+    match:
+      algorithms: ["*private key"]
+    class: WeakClassical
+    urgency: High
+    rationale: >-
+      A private key in source control is compromised the moment the repo
+      is cloned, mirrored, or leaked. No cryptanalysis required — quantum
+      or otherwise.
+    migration: >-
+      Rotate the key now, purge it from git history, and move secrets to
+      a vault or KMS.
+    references: ["NIST SP 800-57 Part 1"]
+
   # ── broken or deprecated today, quantum aside ───────────────────────
   - name: legacy-tls-protocol
     match:

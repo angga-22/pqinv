@@ -1,9 +1,12 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -29,6 +32,8 @@ var (
 	flagConfig      string
 	flagConcurrency int
 	flagFailOn      string
+	flagCAFile      string
+	flagInsecure    bool
 )
 
 var urgencyRank = map[model.Urgency]int{
@@ -48,10 +53,10 @@ var scanCmd = &cobra.Command{
 		default:
 			return fmt.Errorf("--format must be pretty|json|cbom, got %q", flagFormat)
 		}
-		switch strings.ToLower(flagFailOn) {
-		case "", "low", "medium", "high":
-		default:
-			return fmt.Errorf("--fail-on must be high|medium|low, got %q", flagFailOn)
+		if flagFailOn != "" {
+			if _, ok := parseUrgency(flagFailOn); !ok {
+				return fmt.Errorf("--fail-on must be high|medium|low, got %q", flagFailOn)
+			}
 		}
 		return nil
 	},
@@ -74,7 +79,10 @@ then classifies every published key and every advertised signing
 algorithm. Works against any OIDC provider — Keycloak, Auth0, Entra,
 Okta:
 
-  pqinv scan oidc https://id.example.com/realms/main`,
+  pqinv scan oidc https://id.example.com/realms/main
+
+Issuers behind a private CA: --ca-file ca.pem adds a PEM bundle to the
+trust store; --insecure skips verification entirely (lab realms only).`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSingle(cmd, "oidc", args[0])
@@ -84,7 +92,12 @@ Okta:
 var scanRepoCmd = &cobra.Command{
 	Use:   "repo <directory>",
 	Short: "Statically scan a source tree for crypto imports and algorithm literals",
-	Args:  cobra.ExactArgs(1),
+	Long: `Walks the tree and matches each line against the embedded crypto
+patterns (imports, JOSE algorithm literals, committed private keys).
+A ` + repo.IgnoreFile + ` file in the directory excludes paths, one glob per
+line (Go path.Match syntax; no slash matches the base name anywhere,
+trailing slash means directories only).`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSingle(cmd, "repo", args[0])
 	},
@@ -107,18 +120,9 @@ var scanAllCmd = &cobra.Command{
 		if flagConfig == "" {
 			return fmt.Errorf("scan all requires --config")
 		}
-		data, err := os.ReadFile(flagConfig)
+		targets, err := loadTargets(flagConfig)
 		if err != nil {
 			return err
-		}
-		var cfg struct {
-			Targets []scan.Target `yaml:"targets"`
-		}
-		if err := yaml.Unmarshal(data, &cfg); err != nil {
-			return fmt.Errorf("parse %s: %w", flagConfig, err)
-		}
-		if len(cfg.Targets) == 0 {
-			return fmt.Errorf("%s lists no targets", flagConfig)
 		}
 
 		probes, err := buildProbes()
@@ -131,7 +135,7 @@ var scanAllCmd = &cobra.Command{
 		}
 
 		runner := &scan.Runner{Probes: probes, Concurrency: flagConcurrency}
-		results := runner.Run(cmd.Context(), cfg.Targets)
+		results := runner.Run(cmd.Context(), targets)
 
 		reports := make([]report.TargetReport, 0, len(results))
 		for _, res := range results {
@@ -146,6 +150,30 @@ var scanAllCmd = &cobra.Command{
 		}
 		return emit(reports)
 	},
+}
+
+// loadTargets parses a targets.yaml. An empty list is an error: a CI
+// gate that scans nothing must not pass.
+func loadTargets(path string) ([]scan.Target, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cfg struct {
+		Targets []scan.Target `yaml:"targets"`
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if len(cfg.Targets) == 0 {
+		return nil, fmt.Errorf("%s lists no targets", path)
+	}
+	for i, t := range cfg.Targets {
+		if t.Probe == "" || t.Target == "" {
+			return nil, fmt.Errorf("%s: target %d needs both probe and target", path, i+1)
+		}
+	}
+	return cfg.Targets, nil
 }
 
 // runSingle is one target through the whole pipeline: probe → sort →
@@ -196,17 +224,33 @@ func emit(reports []report.TargetReport) error {
 	if err != nil {
 		return err
 	}
-	return checkFailOn(reports)
+	return checkFailOn(flagFailOn, reports)
+}
+
+func parseUrgency(s string) (model.Urgency, bool) {
+	switch strings.ToLower(s) {
+	case "high":
+		return model.UrgencyHigh, true
+	case "medium":
+		return model.UrgencyMedium, true
+	case "low":
+		return model.UrgencyLow, true
+	}
+	return "", false
 }
 
 // checkFailOn is the CI gate: exit non-zero when findings at or above
 // the threshold exist. Unreachable targets always trip the gate — "we
 // couldn't check" must never read as "all clear".
-func checkFailOn(reports []report.TargetReport) error {
-	if flagFailOn == "" {
+func checkFailOn(failOn string, reports []report.TargetReport) error {
+	if failOn == "" {
 		return nil
 	}
-	threshold := urgencyRank[model.Urgency(strings.ToUpper(flagFailOn[:1])+strings.ToLower(flagFailOn[1:]))]
+	urgency, ok := parseUrgency(failOn)
+	if !ok {
+		return fmt.Errorf("--fail-on must be high|medium|low, got %q", failOn)
+	}
+	threshold := urgencyRank[urgency]
 
 	findings, unreachable := 0, 0
 	for _, rep := range reports {
@@ -221,7 +265,7 @@ func checkFailOn(reports []report.TargetReport) error {
 	}
 	if findings > 0 || unreachable > 0 {
 		return fmt.Errorf("fail-on %s: %d findings at or above threshold, %d unreachable targets",
-			strings.ToLower(flagFailOn), findings, unreachable)
+			strings.ToLower(failOn), findings, unreachable)
 	}
 	return nil
 }
@@ -231,11 +275,41 @@ func buildProbes() (map[string]probe.Probe, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load repo patterns: %w", err)
 	}
+	httpClient, err := newHTTPClient(flagCAFile, flagInsecure)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]probe.Probe{
 		"tls":  &tlsprobe.Probe{Timeout: flagTimeout},
-		"oidc": &oidc.Probe{Timeout: flagTimeout},
+		"oidc": &oidc.Probe{Timeout: flagTimeout, Client: httpClient},
 		"repo": repoProbe,
 	}, nil
+}
+
+// newHTTPClient builds the client the OIDC probe fetches with. Identity
+// infrastructure usually lives behind a private CA, so --ca-file appends
+// a PEM bundle to the system roots; --insecure skips verification for
+// lab boxes. The TLS probe is unaffected: it never verifies, because it
+// inventories what a server presents rather than deciding to trust it.
+func newHTTPClient(caFile string, insecure bool) (*http.Client, error) {
+	tlsCfg := &tls.Config{InsecureSkipVerify: insecure} //nolint:gosec // opt-in via --insecure
+	if caFile != "" {
+		pemBytes, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("--ca-file: %w", err)
+		}
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM(pemBytes) {
+			return nil, fmt.Errorf("--ca-file %s: no PEM certificates found", caFile)
+		}
+		tlsCfg.RootCAs = pool
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsCfg
+	return &http.Client{Transport: transport}, nil
 }
 
 func init() {
@@ -244,6 +318,8 @@ func init() {
 	scanCmd.PersistentFlags().StringVar(&flagOut, "out", "", "write report to file instead of stdout")
 	scanCmd.PersistentFlags().IntVar(&flagConcurrency, "concurrency", 8, "max concurrent targets (scan all)")
 	scanCmd.PersistentFlags().StringVar(&flagFailOn, "fail-on", "", "exit 1 if findings at or above this urgency exist: high|medium|low")
+	scanCmd.PersistentFlags().StringVar(&flagCAFile, "ca-file", "", "PEM bundle of extra CA certificates trusted when fetching OIDC documents")
+	scanCmd.PersistentFlags().BoolVar(&flagInsecure, "insecure", false, "skip TLS certificate verification when fetching OIDC documents")
 	scanAllCmd.Flags().StringVar(&flagConfig, "config", "", "targets file (yaml)")
 	scanCmd.AddCommand(scanTLSCmd, scanOIDCCmd, scanRepoCmd, scanAllCmd)
 	rootCmd.AddCommand(scanCmd)

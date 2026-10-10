@@ -29,7 +29,7 @@ Everything is a pipeline — probes collect evidence, a data-driven classifier (
 
 - **TLS probe** — detects hybrid post-quantum key exchange (`X25519MLKEM768`), supported classical groups, protocol versions TLS 1.0→1.3, and every certificate in the presented chain.
 - **OIDC probe** — points at any OIDC issuer (Keycloak, Auth0, Entra, Okta) and classifies both the *published* JWKS keys and the *advertised* signing algorithms.
-- **Repo probe** — finds crypto imports, JOSE algorithm literals, and committed private keys in source, with `file.go:42` locations.
+- **Repo probe** — finds crypto imports, JOSE algorithm literals, and committed private keys (PEM, PKCS#8, OpenSSH — flagged High: a key in git is compromised today) in source, with `file.go:42` locations.
 - **Verdicts that understand context** — a classical key-exchange group offered *alongside* a hybrid PQ one is flagged as a fallback, not screamed about as an exposure.
 - **A readiness score** — 0–100 with a letter grade per target (see [Reading the score](#reading-the-score)).
 - **CI gate** — `--fail-on high` exits 1 on findings at or above the threshold; unreachable targets always fail, because "couldn't check" must never read as "all clear".
@@ -48,7 +48,13 @@ Real scans, September 2026:
 go install github.com/angga-22/pqinv/cmd/pqinv@latest
 ```
 
-Requires Go ≥ 1.24 to build (X25519MLKEM768 in the standard library). Or grab a release binary.
+Requires Go ≥ 1.26 to build — the floor is set by the dependency set, kept current because govulncheck runs in CI (X25519MLKEM768 itself has been in the standard library since 1.24). Or grab a release binary.
+
+Changes between versions are in [CHANGELOG.md](CHANGELOG.md).
+
+## Internal issuers
+
+Most identity infrastructure lives behind a private CA. `--ca-file ca.pem` adds a PEM bundle to the trust store the OIDC probe uses; `--insecure` skips verification entirely (lab realms only). The TLS probe is unaffected either way — it never verifies, because it inventories what a server *presents*, trusted or not.
 
 ## Output formats
 
@@ -62,6 +68,7 @@ Requires Go ≥ 1.24 to build (X25519MLKEM768 in the standard library). Or grab 
     {
       "probe": "tls",
       "target": "github.com:443",
+      "status": "ok",
       "score": 31,
       "grade": "D",
       "verdicts": [
@@ -77,6 +84,8 @@ Requires Go ≥ 1.24 to build (X25519MLKEM768 in the standard library). Or grab 
   ]
 }
 ```
+
+An unreachable target is reported as `"status": "unreachable"` with an `error` and **no** `score` or `grade` — "couldn't check" is never a number.
 
 `--format cbom` emits a [CycloneDX 1.6 Cryptography Bill of Materials](https://cyclonedx.org/capabilities/cbom/): one `cryptographic-asset` component per finding, pqinv's classification carried in `pqinv:*` properties.
 
@@ -112,8 +121,8 @@ Both tools answer "does this endpoint advertise PQC key exchange?" — a point-i
 ## Limitations (v1, on purpose)
 
 - Go's stdlib refuses to offer truly legacy junk (SSLv3, RC4, export ciphers), so those are invisible to the TLS probe. The tool's job is PQ readiness, not an ssllabs clone.
-- The repo probe is regex, not AST: it can't tell a comment from code (pqinv flags its own `rules.yaml` — an honest artifact of pattern scanning). Doc/markup files are excluded; config formats are scanned on purpose.
-- `.gitignore` is not parsed; well-known junk directories are skipped instead.
+- The repo probe is regex, not AST: it can't tell a comment from code. A `.pqinvignore` in the scanned root (one glob per line) excludes paths — pqinv's own excludes its rule and pattern files, which name every algorithm they detect. Doc/markup files are excluded; config formats are scanned on purpose.
+- `.gitignore` is not parsed; well-known junk directories are skipped instead, and `.pqinvignore` covers the rest.
 
 ## Roadmap
 

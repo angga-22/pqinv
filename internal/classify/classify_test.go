@@ -34,6 +34,12 @@ func TestClassifySeedRules(t *testing.T) {
 		{"cert key ecdsa", "ECDSA P-256", model.UsageSignature, 256, model.ClassVulnerable, model.UrgencyMedium},
 		{"rsa-1024 broken classically", "RSA", model.UsageSignature, 1024, model.ClassWeakClassical, model.UrgencyHigh},
 
+		// A leaked key is compromised today; it must outrank the "RSA import"
+		// verdict even though both carry an RSA algorithm label.
+		{"committed rsa private key", "RSA private key", model.UsageSignature, 0, model.ClassWeakClassical, model.UrgencyHigh},
+		{"committed pkcs8 private key", "PKCS#8 private key", model.UsageSignature, 0, model.ClassWeakClassical, model.UrgencyHigh},
+		{"committed openssh private key", "OpenSSH private key", model.UsageSignature, 0, model.ClassWeakClassical, model.UrgencyHigh},
+
 		{"jwk rs256", "RS256", model.UsageSignature, 2048, model.ClassVulnerable, model.UrgencyMedium},
 		{"advertised es256 (no key bits)", "ES256", model.UsageSignature, 0, model.ClassVulnerable, model.UrgencyMedium},
 		{"advertised eddsa", "EdDSA", model.UsageSignature, 0, model.ClassVulnerable, model.UrgencyMedium},

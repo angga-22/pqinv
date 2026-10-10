@@ -56,12 +56,23 @@ patterns:
     algorithm: RC4
     usage: Encryption
 
-  # Key material committed to the repo
+  # Key material committed to the repo. The algorithm label is deliberately
+  # NOT the bare algorithm name: "RSA" on an import line and an RSA private
+  # key sitting in git are different facts, and the rules engine can only
+  # tell them apart by Algorithm. rules.yaml matches "*private key".
   - name: rsa-private-key-pem
     regex: 'BEGIN RSA PRIVATE KEY'
-    algorithm: RSA
+    algorithm: RSA private key
     usage: Signature
   - name: ec-private-key-pem
     regex: 'BEGIN EC PRIVATE KEY'
-    algorithm: ECDSA
+    algorithm: ECDSA private key
+    usage: Signature
+  - name: pkcs8-private-key-pem
+    regex: 'BEGIN (ENCRYPTED )?PRIVATE KEY'
+    algorithm: PKCS#8 private key
+    usage: Signature
+  - name: openssh-private-key-pem
+    regex: 'BEGIN OPENSSH PRIVATE KEY'
+    algorithm: OpenSSH private key
     usage: Signature

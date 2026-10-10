@@ -1,0 +1,43 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+      - name: release notes from CHANGELOG.md
+        id: notes
+        # Use the section whose heading contains "[<version>]" as the GitHub
+        # release body. If there is none, goreleaser falls back to its
+        # commit-based changelog.
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          awk -v tag="$tag" '
+            /^## \[/ { in_section = index($0, "[" tag "]") > 0; next }
+            in_section { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ -s release-notes.md ]; then
+            echo "args=--release-notes=release-notes.md" >> "$GITHUB_OUTPUT"
+          else
+            echo "no CHANGELOG.md section for $tag; using goreleaser's commit log"
+          fi
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean ${{ steps.notes.outputs.args }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

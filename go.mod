@@ -1,6 +1,6 @@
 module github.com/angga-22/pqinv
 
-go 1.27.1
+go 1.26.0
 
 require (
 	github.com/CycloneDX/cyclonedx-go v0.12.0
@@ -33,6 +33,6 @@ require (
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/crypto v0.53.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )
