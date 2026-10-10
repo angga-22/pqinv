@@ -23,14 +23,17 @@ jobs:
         # Use the section whose heading contains "[<version>]" as the GitHub
         # release body. If there is none, goreleaser falls back to its
         # commit-based changelog.
+        # Written outside the checkout: goreleaser refuses to run if the
+        # working tree has any untracked file.
         run: |
           tag="${GITHUB_REF_NAME#v}"
+          notes="$RUNNER_TEMP/release-notes.md"
           awk -v tag="$tag" '
             /^## \[/ { in_section = index($0, "[" tag "]") > 0; next }
             in_section { print }
-          ' CHANGELOG.md > release-notes.md
-          if [ -s release-notes.md ]; then
-            echo "args=--release-notes=release-notes.md" >> "$GITHUB_OUTPUT"
+          ' CHANGELOG.md > "$notes"
+          if [ -s "$notes" ]; then
+            echo "args=--release-notes=$notes" >> "$GITHUB_OUTPUT"
           else
             echo "no CHANGELOG.md section for $tag; using goreleaser's commit log"
           fi
