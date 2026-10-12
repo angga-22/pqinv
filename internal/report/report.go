@@ -53,6 +53,27 @@ func (r TargetReport) MarshalJSON() ([]byte, error) {
 	}{r.Probe, r.Target, StatusOK, r.Score, r.Grade, verdicts})
 }
 
+// UnmarshalJSON reads the schema MarshalJSON writes, so a report can be
+// loaded back as a baseline. Status is derived from error, not stored.
+func (r *TargetReport) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Probe    string          `json:"probe"`
+		Target   string          `json:"target"`
+		Error    string          `json:"error"`
+		Score    int             `json:"score"`
+		Grade    string          `json:"grade"`
+		Verdicts []model.Verdict `json:"verdicts"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*r = TargetReport{
+		Probe: raw.Probe, Target: raw.Target, Error: raw.Error,
+		Score: raw.Score, Grade: raw.Grade, Verdicts: raw.Verdicts,
+	}
+	return nil
+}
+
 type envelope struct {
 	Tool    string         `json:"tool"`
 	Version string         `json:"version"`

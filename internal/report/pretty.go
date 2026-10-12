@@ -121,16 +121,35 @@ func contextNote(a model.CryptoAsset) string {
 	parts := []string{usageLabel(a.Usage), a.Location}
 	switch a.Metadata["kind"] {
 	case "certificate":
+		if e := a.Metadata["error"]; e != "" {
+			parts = append(parts, e)
+			break
+		}
 		parts = append(parts, a.Metadata["subject"], "expires "+a.Metadata["not_after"])
+		if r := a.Metadata["role"]; r != "" {
+			parts = append(parts, r)
+		}
 	case "jwk":
 		if kid := a.Metadata["kid"]; kid != "" {
 			parts = append(parts, "kid "+kid)
 		}
-	case "advertised-signing-alg":
+	case "certificate-signature":
+		parts = append(parts, a.Metadata["subject"], "signed with "+a.Metadata["signature_algorithm"])
+	case "advertised-signing-alg", "advertised-encryption-alg":
 		parts = append(parts, "advertised capability")
 	case "key-exchange-group", "cipher-suite":
 		if v := a.Metadata["tls_version"]; v != "" {
 			parts = append(parts, v)
+		}
+		if cs := a.Metadata["cipher_suite"]; cs != "" {
+			parts = append(parts, cs)
+		}
+	case "plaintext-transport":
+		parts = append(parts, a.Metadata["url"])
+	case "saml-algorithm":
+		parts = append(parts, a.Metadata["element"])
+		if r := a.Metadata["role"]; r != "" {
+			parts = append(parts, r)
 		}
 	case "source-pattern":
 		if s := a.Metadata["snippet"]; s != "" {

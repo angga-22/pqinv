@@ -57,6 +57,28 @@ func TestClassifySeedRules(t *testing.T) {
 		{"md5", "MD5", model.UsageHash, 0, model.ClassWeakClassical, model.UrgencyHigh},
 
 		{"unknown surfaces loudly", "FROBNICATE-9000", model.UsageHash, 0, model.ClassUnknown, model.UrgencyMedium},
+		// 0.3.0: issuer transport, JOSE/XML encryption, SAML names, cert signature hashes
+		{"issuer on plain http", "HTTP", model.UsageProtocol, 0, model.ClassWeakClassical, model.UrgencyHigh},
+		{"enc jwk without alg is HNDL-urgent", "RSA", model.UsageEncryption, 2048, model.ClassVulnerable, model.UrgencyHigh},
+		{"ecdh-es jwe is HNDL-urgent", "ECDH-ES", model.UsageEncryption, 0, model.ClassVulnerable, model.UrgencyHigh},
+		{"ecdh enc key without alg", "ECDH P-256", model.UsageEncryption, 256, model.ClassVulnerable, model.UrgencyHigh},
+		{"jwe dir", "dir", model.UsageEncryption, 0, model.ClassAcceptable, model.UrgencyNone},
+		{"jwe a128cbc-hs256", "A128CBC-HS256", model.UsageEncryption, 0, model.ClassAcceptable, model.UrgencyLow},
+		{"jwe a256gcm", "A256GCM", model.UsageEncryption, 0, model.ClassAcceptable, model.UrgencyNone},
+		{"jwe pbes2", "PBES2-HS256+A128KW", model.UsageEncryption, 0, model.ClassAcceptable, model.UrgencyLow},
+		{"saml rsa-sha1 signature", "RSA-SHA1", model.UsageSignature, 0, model.ClassWeakClassical, model.UrgencyHigh},
+		{"saml rsa-sha256 signature", "RSA-SHA256", model.UsageSignature, 0, model.ClassVulnerable, model.UrgencyMedium},
+		{"saml rsa-pss signature", "RSA-PSS-SHA256", model.UsageSignature, 0, model.ClassVulnerable, model.UrgencyMedium},
+		{"saml ecdsa-sha256 signature", "ECDSA-SHA256", model.UsageSignature, 0, model.ClassVulnerable, model.UrgencyMedium},
+		{"saml rsa-1_5 key transport", "RSA1_5", model.UsageEncryption, 0, model.ClassVulnerable, model.UrgencyHigh},
+		{"saml 3des", "3DES-CBC", model.UsageEncryption, 0, model.ClassWeakClassical, model.UrgencyHigh},
+		{"saml aes-128-cbc", "AES-128-CBC", model.UsageEncryption, 0, model.ClassAcceptable, model.UrgencyLow},
+		{"saml aes-256-gcm", "AES-256-GCM", model.UsageEncryption, 0, model.ClassAcceptable, model.UrgencyNone},
+		{"rsa key transport in tls", "RSA", model.UsageKeyExchange, 0, model.ClassVulnerable, model.UrgencyHigh},
+		{"tls 3des suite", "TLS_RSA_WITH_3DES_EDE_CBC_SHA", model.UsageEncryption, 0, model.ClassWeakClassical, model.UrgencyHigh},
+		{"cert signed with sha-1", "SHA-1", model.UsageHash, 0, model.ClassWeakClassical, model.UrgencyHigh},
+		{"cert signed with sha-256", "SHA-256", model.UsageHash, 0, model.ClassAcceptable, model.UrgencyNone},
+		{"cert signed with sha-384", "SHA-384", model.UsageHash, 0, model.ClassAcceptable, model.UrgencyNone},
 	}
 
 	for _, tc := range cases {

@@ -2,17 +2,13 @@ package tlsprobe
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/ed25519"
-	"crypto/rsa"
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"net"
-	"strconv"
 	"time"
 
 	"github.com/angga-22/pqinv/internal/model"
+	"github.com/angga-22/pqinv/internal/probe/certs"
 )
 
 const defaultTimeout = 10 * time.Second
@@ -55,6 +51,21 @@ var ecdheOnlyCiphers = []uint16{
 	tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
 }
 
+// rsaKexCiphers are the RSA key-transport suites: the client encrypts
+// the premaster secret to the server's RSA key, so there is no forward
+// secrecy and every recorded session falls with that one key — to a
+// leak today or to Shor later. Go dropped them from its defaults in
+// 1.22, which is exactly why they need their own pass: a server that
+// still accepts them is invisible to a default handshake.
+var rsaKexCiphers = []uint16{
+	tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_RSA_WITH_AES_128_CBC_SHA256,
+	tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+	tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+	tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA,
+}
+
 var versions = []struct {
 	id   uint16
 	name string
@@ -75,7 +86,16 @@ func (p *Probe) Scan(ctx context.Context, target string) ([]model.CryptoAsset, e
 
 	cs, err := p.handshake(ctx, target, base.Clone())
 	if err != nil {
-		return nil, fmt.Errorf("baseline handshake with %s failed: %w", target, err)
+		// A legacy-only server (TLS 1.2, RSA key transport, nothing Go
+		// offers by default) must still be inventoried — it is the worst
+		// case, not an unreachable one. Retry with every suite we know.
+		legacy := base.Clone()
+		legacy.CipherSuites = append(append([]uint16{}, ecdheOnlyCiphers...), rsaKexCiphers...)
+		legacy.MaxVersion = tls.VersionTLS12
+		var legacyErr error
+		if cs, legacyErr = p.handshake(ctx, target, legacy); legacyErr != nil {
+			return nil, fmt.Errorf("baseline handshake with %s failed: %w", target, err)
+		}
 	}
 
 	var assets []model.CryptoAsset
@@ -92,7 +112,8 @@ func (p *Probe) Scan(ctx context.Context, target string) ([]model.CryptoAsset, e
 	})
 
 	for i, cert := range cs.PeerCertificates {
-		assets = append(assets, certAsset(target, i, cert))
+		loc := fmt.Sprintf("%s cert#%d", target, i)
+		assets = append(assets, certs.Assets(p.Name(), loc, model.UsageSignature, cert)...)
 	}
 
 	for _, g := range kexGroups {
@@ -118,12 +139,41 @@ func (p *Probe) Scan(ctx context.Context, target string) ([]model.CryptoAsset, e
 		})
 	}
 
+	// RSA key transport: offer only TLS_RSA_* suites and cap at TLS 1.2
+	// (1.3 ignores the suite list, which would make this a false
+	// positive). Success proves the server still does RSA key exchange.
+	if ctx.Err() != nil {
+		return assets, ctx.Err()
+	}
+	rsaCfg := base.Clone()
+	rsaCfg.CipherSuites = rsaKexCiphers
+	rsaCfg.MaxVersion = tls.VersionTLS12
+	if rcs, err := p.handshake(ctx, target, rsaCfg); err == nil {
+		assets = append(assets, model.CryptoAsset{
+			Source:    p.Name(),
+			Location:  target,
+			Usage:     model.UsageKeyExchange,
+			Algorithm: "RSA",
+			Metadata: map[string]string{
+				"kind":         "key-exchange-group",
+				"tls_version":  tls.VersionName(rcs.Version),
+				"cipher_suite": tls.CipherSuiteName(rcs.CipherSuite),
+			},
+		})
+	}
+
 	for _, v := range versions {
 		if ctx.Err() != nil {
 			return assets, ctx.Err()
 		}
 		cfg := base.Clone()
 		cfg.MinVersion, cfg.MaxVersion = v.id, v.id
+		if v.id < tls.VersionTLS13 {
+			// Legacy-only servers answer only legacy suites; offer them
+			// all so a TLS 1.0 server that does RSA key transport is
+			// still seen to accept TLS 1.0.
+			cfg.CipherSuites = append(append([]uint16{}, ecdheOnlyCiphers...), rsaKexCiphers...)
+		}
 		if _, err := p.handshake(ctx, target, cfg); err != nil {
 			continue
 		}
@@ -154,36 +204,4 @@ func (p *Probe) handshake(ctx context.Context, target string, cfg *tls.Config) (
 	}
 	defer conn.Close()
 	return conn.(*tls.Conn).ConnectionState(), nil
-}
-
-func certAsset(target string, index int, cert *x509.Certificate) model.CryptoAsset {
-	alg := "Unknown"
-	bits := 0
-	switch pub := cert.PublicKey.(type) {
-	case *rsa.PublicKey:
-		alg = "RSA"
-		bits = pub.N.BitLen()
-	case *ecdsa.PublicKey:
-		alg = "ECDSA " + pub.Curve.Params().Name
-		bits = pub.Curve.Params().BitSize
-	case ed25519.PublicKey:
-		alg = "Ed25519"
-		bits = 256
-	}
-	return model.CryptoAsset{
-		Source:    "tls",
-		Location:  fmt.Sprintf("%s cert#%d", target, index),
-		Usage:     model.UsageSignature,
-		Algorithm: alg,
-		KeyBits:   bits,
-		Metadata: map[string]string{
-			"kind":                "certificate",
-			"subject":             cert.Subject.String(),
-			"issuer":              cert.Issuer.String(),
-			"signature_algorithm": cert.SignatureAlgorithm.String(),
-			"not_after":           cert.NotAfter.UTC().Format(time.RFC3339),
-			"is_ca":               strconv.FormatBool(cert.IsCA),
-			"serial":              cert.SerialNumber.Text(16),
-		},
-	}
 }

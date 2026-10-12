@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -142,5 +143,91 @@ func TestScanInventoriesCertificateChain(t *testing.T) {
 	}
 	if !found {
 		t.Error("no certificate asset emitted")
+	}
+}
+
+func rsaCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "pqinv-rsa-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+func TestScanDetectsRSAKeyTransport(t *testing.T) {
+	// A server that still accepts RSA key exchange — invisible to a
+	// default Go handshake since 1.22, hence the dedicated pass.
+	srvCfg := &tls.Config{
+		Certificates: []tls.Certificate{rsaCert(t)},
+		CipherSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, tls.TLS_RSA_WITH_AES_128_GCM_SHA256},
+		MaxVersion:   tls.VersionTLS12,
+	}
+	got := scanAlgorithms(t, srvCfg, "KeyExchange")
+	if !got["RSA"] {
+		t.Errorf("RSA key transport should be detected, got %v", got)
+	}
+	if !got["X25519"] {
+		t.Errorf("ECDHE groups must still be enumerated alongside, got %v", got)
+	}
+}
+
+func TestScanNoFalseRSAKeyTransport(t *testing.T) {
+	// An ECDSA-only server cannot do RSA key transport at all; an RSA
+	// server with modern defaults refuses the suites. Neither may show it.
+	for name, cfg := range map[string]*tls.Config{
+		"ecdsa server":        {Certificates: []tls.Certificate{selfSignedCert(t)}},
+		"rsa modern defaults": {Certificates: []tls.Certificate{rsaCert(t)}},
+	} {
+		got := scanAlgorithms(t, cfg, "KeyExchange")
+		if got["RSA"] {
+			t.Errorf("%s: RSA key transport reported but the server does not offer it (%v)", name, got)
+		}
+	}
+}
+
+func TestScanLegacyOnlyServerIsNotUnreachable(t *testing.T) {
+	// TLS 1.2 + RSA key transport only: nothing Go offers by default.
+	// The worst-case server must be inventoried, not reported as down.
+	srvCfg := &tls.Config{
+		Certificates: []tls.Certificate{rsaCert(t)},
+		CipherSuites: []uint16{tls.TLS_RSA_WITH_AES_128_CBC_SHA},
+		MinVersion:   tls.VersionTLS12,
+		MaxVersion:   tls.VersionTLS12,
+	}
+	ln := startTLSServer(t, srvCfg)
+	p := &Probe{Timeout: 3 * time.Second}
+	assets, err := p.Scan(context.Background(), ln.Addr().String())
+	if err != nil {
+		t.Fatalf("legacy-only server must scan, got: %v", err)
+	}
+	have := map[string]bool{}
+	for _, a := range assets {
+		have[string(a.Usage)+"/"+a.Algorithm] = true
+	}
+	for _, want := range []string{"KeyExchange/RSA", "Protocol/TLS 1.2", "Encryption/TLS_RSA_WITH_AES_128_CBC_SHA"} {
+		if !have[want] {
+			t.Errorf("missing %s in %v", want, have)
+		}
+	}
+}
+
+func TestScanEmitsCertificateSignatureHash(t *testing.T) {
+	srvCfg := &tls.Config{Certificates: []tls.Certificate{selfSignedCert(t)}}
+	got := scanAlgorithms(t, srvCfg, "Hash")
+	if !got["SHA-256"] {
+		t.Errorf("the chain's signature hash should be inventoried, got %v", got)
 	}
 }

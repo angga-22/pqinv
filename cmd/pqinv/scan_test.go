@@ -2,12 +2,15 @@ package main
 
 import (
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/angga-22/pqinv/internal/baseline"
 	"github.com/angga-22/pqinv/internal/model"
 	"github.com/angga-22/pqinv/internal/report"
 )
@@ -44,11 +47,64 @@ func TestCheckFailOn(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkFailOn(tc.failOn, tc.reports)
+			err := checkFailOn(tc.failOn, tc.reports, nil)
 			if (err != nil) != tc.wantFail {
 				t.Errorf("checkFailOn(%q) = %v, wantFail=%v", tc.failOn, err, tc.wantFail)
 			}
 		})
+	}
+}
+
+func TestCheckFailOnAgainstBaseline(t *testing.T) {
+	high := func(alg string) model.Verdict {
+		return model.Verdict{
+			Asset:   model.CryptoAsset{Source: "tls", Location: "x:443", Usage: model.UsageKeyExchange, Algorithm: alg},
+			Class:   model.ClassVulnerable,
+			Urgency: model.UrgencyHigh,
+		}
+	}
+	inherited := report.TargetReport{Probe: "tls", Target: "x:443", Verdicts: []model.Verdict{high("X25519")}}
+	bl := baseline.FromReports([]report.TargetReport{inherited})
+
+	if err := checkFailOn("high", []report.TargetReport{inherited}, bl); err != nil {
+		t.Errorf("findings already in the baseline must not trip the gate: %v", err)
+	}
+
+	regressed := report.TargetReport{Probe: "tls", Target: "x:443", Verdicts: []model.Verdict{high("X25519"), high("P-256")}}
+	err := checkFailOn("high", []report.TargetReport{regressed}, bl)
+	if err == nil {
+		t.Fatal("a finding not in the baseline must trip the gate")
+	}
+	if !strings.Contains(err.Error(), "1 new findings") || !strings.Contains(err.Error(), "P-256") {
+		t.Errorf("error should count and name the new finding: %v", err)
+	}
+	if strings.Contains(err.Error(), "X25519") {
+		t.Errorf("inherited findings must not be listed: %v", err)
+	}
+
+	down := report.TargetReport{Probe: "tls", Target: "down:443", Error: "refused"}
+	if err := checkFailOn("high", []report.TargetReport{inherited, down}, bl); err == nil {
+		t.Error("unreachable targets trip the gate even against a baseline")
+	}
+}
+
+func TestGateErrorListsAtMostTen(t *testing.T) {
+	var verdicts []model.Verdict
+	for i := 0; i < 15; i++ {
+		verdicts = append(verdicts, model.Verdict{
+			Asset:   model.CryptoAsset{Source: "repo", Location: fmt.Sprintf("f%d.go:1", i), Usage: model.UsageHash, Algorithm: "MD5"},
+			Urgency: model.UrgencyHigh,
+		})
+	}
+	err := checkFailOn("high", []report.TargetReport{{Probe: "repo", Target: ".", Verdicts: verdicts}}, nil)
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if got := strings.Count(err.Error(), "\n"); got != 11 {
+		t.Errorf("expected 10 listed findings plus an overflow line, got %d lines:\n%s", got, err)
+	}
+	if !strings.Contains(err.Error(), "and 5 more") {
+		t.Errorf("overflow line missing: %v", err)
 	}
 }
 

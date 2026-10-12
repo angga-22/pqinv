@@ -51,7 +51,8 @@ jobs:
 
   dogfood:
     # pqinv scanning pqinv: every probe that works offline, every output
-    # format, and the CI gate itself.
+    # format, and the gate itself — with and without a baseline. Reports
+    # go to $RUNNER_TEMP so the repo probe never scans its own output.
     name: dogfood
     runs-on: ubuntu-latest
     steps:
@@ -63,17 +64,29 @@ jobs:
       - name: repo scan, all formats
         run: |
           ./pqinv scan repo . --format pretty
-          ./pqinv scan repo . --format json --out report.json
-          ./pqinv scan repo . --format cbom --out report.cbom.json
-          python3 -m json.tool report.json > /dev/null
-          python3 -m json.tool report.cbom.json > /dev/null
+          ./pqinv scan repo . --format json --out "$RUNNER_TEMP/report.json"
+          ./pqinv scan repo . --format cbom --out "$RUNNER_TEMP/report.cbom.json"
+          python3 -m json.tool "$RUNNER_TEMP/report.json" > /dev/null
+          python3 -m json.tool "$RUNNER_TEMP/report.cbom.json" > /dev/null
       - name: gate trips on unreachable target
         run: |
-          cat > targets.yaml <<'YAML'
+          cat > "$RUNNER_TEMP/targets.yaml" <<'YAML'
           targets:
             - probe: tls
               target: 127.0.0.1:1
           YAML
-          if ./pqinv scan all --config targets.yaml --fail-on high --format json; then
+          if ./pqinv scan all --config "$RUNNER_TEMP/targets.yaml" --fail-on high --format json; then
             echo "gate must fail on an unreachable target"; exit 1
           fi
+      - name: baseline gate passes on an unchanged tree
+        run: |
+          ./pqinv scan repo . --format json --out "$RUNNER_TEMP/baseline.json"
+          ./pqinv scan repo . --fail-on low --baseline "$RUNNER_TEMP/baseline.json" > /dev/null
+      - name: baseline gate trips on a regression
+        run: |
+          mkdir -p zz_regression
+          printf 'package zz\n\n// legacy: md5 still here\n' > zz_regression/x.go
+          if ./pqinv scan repo . --fail-on high --baseline "$RUNNER_TEMP/baseline.json" > /dev/null; then
+            echo "gate must fail on a finding that is not in the baseline"; exit 1
+          fi
+          rm -rf zz_regression

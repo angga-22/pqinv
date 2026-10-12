@@ -33,7 +33,7 @@ const (
 )
 
 type CryptoAsset struct {
-	Source    string            `json:"source"`   // "oidc" | "tls" | "repo"
+	Source    string            `json:"source"`   // "tls" | "oidc" | "saml" | "repo"
 	Location  string            `json:"location"` // "id.example.com:443", jwks URL, "file.go:42"
 	Usage     Usage             `json:"usage"`
 	Algorithm string            `json:"algorithm"` // normalized: "X25519", "RSA", "ES256", "ML-KEM-768"…

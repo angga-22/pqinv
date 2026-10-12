@@ -7,5 +7,7 @@ targets:
     target: github.com:443
   - probe: oidc
     target: https://id.example.com/realms/main
+  - probe: saml
+    target: https://idp.example.org/idp/shibboleth
   - probe: repo
     target: .

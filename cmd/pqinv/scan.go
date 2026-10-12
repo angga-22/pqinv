@@ -14,11 +14,13 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/angga-22/pqinv/internal/baseline"
 	"github.com/angga-22/pqinv/internal/classify"
 	"github.com/angga-22/pqinv/internal/model"
 	"github.com/angga-22/pqinv/internal/probe"
 	"github.com/angga-22/pqinv/internal/probe/oidc"
 	"github.com/angga-22/pqinv/internal/probe/repo"
+	"github.com/angga-22/pqinv/internal/probe/saml"
 	"github.com/angga-22/pqinv/internal/probe/tlsprobe"
 	"github.com/angga-22/pqinv/internal/report"
 	"github.com/angga-22/pqinv/internal/scan"
@@ -34,6 +36,11 @@ var (
 	flagFailOn      string
 	flagCAFile      string
 	flagInsecure    bool
+	flagBaseline    string
+
+	// gateBaseline is loaded in PersistentPreRunE so a bad --baseline
+	// fails before any scanning happens.
+	gateBaseline *baseline.Baseline
 )
 
 var urgencyRank = map[model.Urgency]int{
@@ -58,6 +65,19 @@ var scanCmd = &cobra.Command{
 				return fmt.Errorf("--fail-on must be high|medium|low, got %q", flagFailOn)
 			}
 		}
+		if flagBaseline != "" {
+			if flagFailOn == "" {
+				return fmt.Errorf("--baseline only makes sense with --fail-on")
+			}
+			f, err := os.Open(flagBaseline)
+			if err != nil {
+				return fmt.Errorf("--baseline: %w", err)
+			}
+			defer f.Close()
+			if gateBaseline, err = baseline.Load(f); err != nil {
+				return fmt.Errorf("--baseline %s: %w", flagBaseline, err)
+			}
+		}
 		return nil
 	},
 }
@@ -73,11 +93,12 @@ var scanTLSCmd = &cobra.Command{
 
 var scanOIDCCmd = &cobra.Command{
 	Use:   "oidc <issuer-url>",
-	Short: "Inventory an OIDC issuer: discovery document + JWKS signing/encryption keys",
-	Long: `Fetches {issuer}/.well-known/openid-configuration and its JWKS,
-then classifies every published key and every advertised signing
-algorithm. Works against any OIDC provider — Keycloak, Auth0, Entra,
-Okta:
+	Short: "Inventory an OIDC issuer: discovery document, JWKS keys, and the issuer's TLS",
+	Long: `Fetches {issuer}/.well-known/openid-configuration and its JWKS, then
+classifies every published key, every advertised signing and encryption
+algorithm, and the TLS endpoint the issuer and JWKS are served from —
+the channel tokens are harvested on. Works against any OIDC provider —
+Keycloak, Auth0, Entra, Okta:
 
   pqinv scan oidc https://id.example.com/realms/main
 
@@ -86,6 +107,22 @@ trust store; --insecure skips verification entirely (lab realms only).`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSingle(cmd, "oidc", args[0])
+	},
+}
+
+var scanSAMLCmd = &cobra.Command{
+	Use:   "saml <metadata-url|file>",
+	Short: "Inventory SAML 2.0 metadata: signing/encryption certificates and XML algorithms",
+	Long: `Reads SAML 2.0 metadata (an IdP, an SP, or a federation aggregate)
+from a URL or a local file and classifies every certificate each entity
+signs and encrypts with, plus every SignatureMethod, DigestMethod,
+SigningMethod and EncryptionMethod the metadata names:
+
+  pqinv scan saml https://idp.example.org/idp/shibboleth
+  pqinv scan saml ./sp-metadata.xml`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runSingle(cmd, "saml", args[0])
 	},
 }
 
@@ -113,6 +150,8 @@ var scanAllCmd = &cobra.Command{
       target: id.example.com:443
     - probe: oidc
       target: https://id.example.com/realms/main
+    - probe: saml
+      target: https://idp.example.org/idp/shibboleth
     - probe: repo
       target: ./my-service`,
 	Args: cobra.NoArgs,
@@ -224,7 +263,7 @@ func emit(reports []report.TargetReport) error {
 	if err != nil {
 		return err
 	}
-	return checkFailOn(flagFailOn, reports)
+	return checkFailOn(flagFailOn, reports, gateBaseline)
 }
 
 func parseUrgency(s string) (model.Urgency, bool) {
@@ -240,9 +279,11 @@ func parseUrgency(s string) (model.Urgency, bool) {
 }
 
 // checkFailOn is the CI gate: exit non-zero when findings at or above
-// the threshold exist. Unreachable targets always trip the gate — "we
-// couldn't check" must never read as "all clear".
-func checkFailOn(failOn string, reports []report.TargetReport) error {
+// the threshold exist. With a baseline, only findings that are new since
+// that report count — regressions, not inherited debt. Unreachable
+// targets always trip the gate — "we couldn't check" must never read as
+// "all clear".
+func checkFailOn(failOn string, reports []report.TargetReport, bl *baseline.Baseline) error {
 	if failOn == "" {
 		return nil
 	}
@@ -252,22 +293,51 @@ func checkFailOn(failOn string, reports []report.TargetReport) error {
 	}
 	threshold := urgencyRank[urgency]
 
-	findings, unreachable := 0, 0
+	unreachable := 0
 	for _, rep := range reports {
 		if rep.Error != "" {
 			unreachable++
 		}
-		for _, v := range rep.Verdicts {
-			if urgencyRank[v.Urgency] >= threshold {
-				findings++
+	}
+
+	var candidates []baseline.Finding
+	if bl != nil {
+		candidates = bl.NewFindings(reports)
+	} else {
+		for _, rep := range reports {
+			for _, v := range rep.Verdicts {
+				candidates = append(candidates, baseline.Finding{Probe: rep.Probe, Target: rep.Target, Verdict: v})
 			}
 		}
 	}
-	if findings > 0 || unreachable > 0 {
-		return fmt.Errorf("fail-on %s: %d findings at or above threshold, %d unreachable targets",
-			strings.ToLower(failOn), findings, unreachable)
+	var tripped []baseline.Finding
+	for _, f := range candidates {
+		if urgencyRank[f.Verdict.Urgency] >= threshold {
+			tripped = append(tripped, f)
+		}
 	}
-	return nil
+	if len(tripped) == 0 && unreachable == 0 {
+		return nil
+	}
+
+	var b strings.Builder
+	if bl != nil {
+		fmt.Fprintf(&b, "fail-on %s vs baseline: %d new findings at or above threshold, %d unreachable targets",
+			strings.ToLower(failOn), len(tripped), unreachable)
+	} else {
+		fmt.Fprintf(&b, "fail-on %s: %d findings at or above threshold, %d unreachable targets",
+			strings.ToLower(failOn), len(tripped), unreachable)
+	}
+	const show = 10
+	for i, f := range tripped {
+		if i == show {
+			fmt.Fprintf(&b, "\n  … and %d more", len(tripped)-show)
+			break
+		}
+		fmt.Fprintf(&b, "\n  %s · %s · %s %s [%s] at %s",
+			f.Probe, f.Target, f.Verdict.Urgency, f.Verdict.Asset.Algorithm, f.Verdict.Asset.Usage, f.Verdict.Asset.Location)
+	}
+	return fmt.Errorf("%s", b.String())
 }
 
 func buildProbes() (map[string]probe.Probe, error) {
@@ -279,9 +349,12 @@ func buildProbes() (map[string]probe.Probe, error) {
 	if err != nil {
 		return nil, err
 	}
+	ua := "pqinv/" + version
+	tlsProbe := &tlsprobe.Probe{Timeout: flagTimeout}
 	return map[string]probe.Probe{
-		"tls":  &tlsprobe.Probe{Timeout: flagTimeout},
-		"oidc": &oidc.Probe{Timeout: flagTimeout, Client: httpClient},
+		"tls":  tlsProbe,
+		"oidc": &oidc.Probe{Timeout: flagTimeout, Client: httpClient, UserAgent: ua, TLS: tlsProbe},
+		"saml": &saml.Probe{Timeout: flagTimeout, Client: httpClient, UserAgent: ua},
 		"repo": repoProbe,
 	}, nil
 }
@@ -318,10 +391,11 @@ func init() {
 	scanCmd.PersistentFlags().StringVar(&flagOut, "out", "", "write report to file instead of stdout")
 	scanCmd.PersistentFlags().IntVar(&flagConcurrency, "concurrency", 8, "max concurrent targets (scan all)")
 	scanCmd.PersistentFlags().StringVar(&flagFailOn, "fail-on", "", "exit 1 if findings at or above this urgency exist: high|medium|low")
+	scanCmd.PersistentFlags().StringVar(&flagBaseline, "baseline", "", "previous --format json report; with --fail-on, only findings new since it count")
 	scanCmd.PersistentFlags().StringVar(&flagCAFile, "ca-file", "", "PEM bundle of extra CA certificates trusted when fetching OIDC documents")
 	scanCmd.PersistentFlags().BoolVar(&flagInsecure, "insecure", false, "skip TLS certificate verification when fetching OIDC documents")
 	scanAllCmd.Flags().StringVar(&flagConfig, "config", "", "targets file (yaml)")
-	scanCmd.AddCommand(scanTLSCmd, scanOIDCCmd, scanRepoCmd, scanAllCmd)
+	scanCmd.AddCommand(scanTLSCmd, scanOIDCCmd, scanSAMLCmd, scanRepoCmd, scanAllCmd)
 	rootCmd.AddCommand(scanCmd)
 }
 
