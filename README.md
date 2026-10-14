@@ -15,6 +15,7 @@ pqinv scan tls  id.example.com:443                   # handshake enumeration + c
 pqinv scan repo ./my-service                         # static crypto-usage scan
 pqinv scan all  --config targets.yaml                # many targets, one report
 pqinv scan all  --config targets.yaml --fail-on high --baseline last.json   # CI: fail only on regressions
+pqinv serve     --config targets.yaml --interval 1h  # continuous: Prometheus metrics on :9465
 ```
 
 ![pqinv demo: TLS, OIDC, repo scans and the CI gate](docs/img/demo.gif)
@@ -36,6 +37,7 @@ Everything is a pipeline — probes collect evidence, a data-driven classifier (
 - **Verdicts that understand context** — a classical key-exchange group offered *alongside* a hybrid PQ one is flagged as a fallback, not screamed about as an exposure.
 - **A readiness score** — 0–100 with a letter grade per target (see [Reading the score](#reading-the-score)).
 - **CI gate** — `--fail-on high` exits 1 on findings at or above the threshold; unreachable targets always fail, because "couldn't check" must never read as "all clear". Add `--baseline last.json` and only findings *new since that report* count — a gate you can turn on today, on endpoints that are not PQ-ready yet, and that catches regressions.
+- **Continuous monitoring** — `pqinv serve` rescans a targets file on an interval and exposes per-target score, findings, unreachability, new-findings counters and certificate expiry as Prometheus metrics. Identity infrastructure changes without a commit — an IdP upgrade, a cert rotation, a console click — and this is what notices.
 
 Real scans, October 2026:
 
@@ -110,6 +112,48 @@ pqinv scan all --config targets.yaml --fail-on high --baseline pq-baseline.json 
 
 A finding is "new" when its (target, source, location, usage, algorithm, class, urgency) was not in the baseline: a Low that becomes High counts, a repo finding that moved to another line does not, and unreachable targets always fail. When the gate trips it names the new findings. Re-generate the baseline when you have *fixed* things, not when you have accepted them.
 
+## Continuous monitoring
+
+```bash
+pqinv serve --config targets.yaml --interval 1h --listen :9465 [--baseline last.json]
+```
+
+| Path | What |
+|---|---|
+| `/metrics` | Prometheus exposition (below) |
+| `/report.json` | latest report in the `--format json` schema — a valid `--baseline` input |
+| `/healthz` | 200 once the first scan has completed |
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `pqinv_score` | probe, target | 0–100; **absent** while the target is unreachable, never zero |
+| `pqinv_findings` | probe, target, urgency | findings by urgency (every urgency always present) |
+| `pqinv_findings_by_class` | probe, target, class | findings by classification |
+| `pqinv_target_unreachable` | probe, target | 1 when the last scan could not reach it — alert on this, "couldn't check" is not "all clear" |
+| `pqinv_new_findings_total` | probe, target | counter: findings that were not in the previous scan (or `--baseline` for the first) — alert on `increase()` |
+| `pqinv_new_findings_last_scan` | probe, target | the same, for the latest scan only |
+| `pqinv_certificate_expiry_timestamp_seconds` | probe, target, location, subject | NotAfter of every certificate seen |
+| `pqinv_scans_total`, `pqinv_last_scan_timestamp_seconds`, `pqinv_last_scan_duration_seconds`, `pqinv_targets`, `pqinv_build_info` | | exporter health |
+
+Every scan is compared with the one before it; new findings are logged to stderr and counted. Two alert rules cover most of it:
+
+```yaml
+groups:
+  - name: pq-readiness
+    rules:
+      - alert: PQReadinessRegression
+        expr: increase(pqinv_new_findings_total[2h]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "new crypto finding on {{ $labels.target }}"}
+      - alert: PQReadinessTargetUnreachable
+        expr: pqinv_target_unreachable == 1
+        for: 2h
+        labels: {severity: warning}
+        annotations: {summary: "pqinv cannot scan {{ $labels.target }}"}
+```
+
+No Prometheus client library: the exposition format is written by hand, and the binary stays dependency-light. `serve` reuses every probe flag (`--timeout`, `--concurrency`, `--ca-file`, `--insecure`); the minimum interval is 10s so a typo cannot hammer an IdP.
+
 ## Reading the score
 
 Grades: **A ≥90 · B ≥75 · C ≥50 · D ≥30 · else F.** Findings deduct points by urgency, capped per usage category, so many findings restating one fact (a realm advertising ten classical JOSE algorithms, say) count as one capped fact — and classical certificate signatures, unavoidable in 2026, can't drag an otherwise well-configured system to F. Roughly: **B** means hybrid PQ key exchange is live and hygiene is good, **C** means either no PQ yet or legacy protocol debt, **D/F** means harvest-now-decrypt-later exposure with nothing mitigating it.
@@ -131,7 +175,8 @@ Grades: **A ≥90 · B ≥75 · C ≥50 · D ≥30 · else F.** Findings deduct 
 | Migration advice per finding | — | — | ✓ |
 | CBOM (CycloneDX 1.6) output | — | — | ✓ |
 | CI gate (`--fail-on`, `--baseline` regressions) | — | — | ✓ |
-| Continuous monitoring (K8s operator) | — | — | v2 |
+| Continuous monitoring (`pqinv serve`, Prometheus) | — | — | ✓ |
+| Kubernetes operator (target discovery) | — | — | v2 |
 
 Both tools answer "does this endpoint advertise PQC key exchange?" — a point-in-time yes/no. pqinv aims at the layer above: inventory, classification, urgency, and workflow, with the identity plane (which neither touches) as its home turf.
 
@@ -145,7 +190,7 @@ Both tools answer "does this endpoint advertise PQC key exchange?" — a point-i
 
 ## Roadmap
 
-SARIF output so repo findings land as pull-request annotations, `pqinv serve` (scheduled scans of a targets file exposed as Prometheus metrics — the stepping stone to the operator), an SSH probe (credit: pqcscan does this), passive PCAP analysis (credit: pqcdump), AST-based Go analysis, finer CBOM asset typing — and v2: a Kubernetes operator that watches Ingress/TLS Secrets and exports per-target readiness ([sketch](docs/architecture.md#v2-sketch-the-kubernetes-operator)).
+SARIF output so repo findings land as pull-request annotations, a container image for `serve`, an SSH probe (credit: pqcscan does this), passive PCAP analysis (credit: pqcdump), AST-based Go analysis, finer CBOM asset typing — and v2: a Kubernetes operator that discovers targets from Ingress/TLS Secrets and feeds them to the `serve` loop ([sketch](docs/architecture.md#v2-sketch-the-kubernetes-operator)).
 
 ## References
 

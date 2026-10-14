@@ -1,6 +1,6 @@
 # pqinv architecture
 
-*As built — kept current with each release (last: v0.3.0, October 2026). Where the code and this document disagree, the code is the truth and this document gets fixed.*
+*As built — kept current with each release (last: v0.4.0, October 2026). Where the code and this document disagree, the code is the truth and this document gets fixed.*
 
 pqinv is an identity-first Go CLI that inventories the cryptography a system actually uses — OIDC/JWKS keys, SAML metadata, TLS handshakes, certificate chains, source code — classifies every finding against the NIST post-quantum migration timeline, and renders a report, a JSON document, or a CycloneDX 1.6 CBOM.
 
@@ -29,6 +29,7 @@ flowchart LR
     correlate --> score["score<br/>capped deductions → grade"]
     score --> report
     baseline[("baseline<br/>previous JSON")] -. "--fail-on" .-> report
+    report --> serve["serve<br/>/metrics · /report.json"]
 
     subgraph report["report (render only)"]
         pretty["pretty<br/>terminal, by urgency"]
@@ -44,6 +45,7 @@ That separation is why CBOM, `--fail-on`, the SAML probe and the baseline gate e
 ```
 pqinv/
 ├── cmd/pqinv/              # cobra command tree — the ONLY place that prints or exits
+│                           # scan.go (probes → report), serve.go (scheduler + HTTP)
 ├── internal/
 │   ├── model/              # CryptoAsset, Verdict, enums — zero dependencies
 │   ├── probe/
@@ -54,7 +56,9 @@ pqinv/
 │   │   ├── saml/           # metadata token walker: KeyDescriptors + algorithm URIs
 │   │   └── repo/           # file walker + embedded patterns.yaml + .pqinvignore
 │   ├── classify/           # rules engine + Correlate; rules embedded via go:embed
+│   ├── pipeline/           # sort → classify → correlate → score, shared by scan and serve
 │   ├── baseline/           # previous-report fingerprints for the regression gate
+│   ├── serve/              # scheduled scans, Prometheus text exposition, /report.json
 │   ├── score/              # one pure function: verdicts → 0–100 + grade
 │   ├── report/             # pretty / json / cbom renderers over TargetReport
 │   └── scan/               # multi-target fan-out (errgroup, bounded)
@@ -64,7 +68,9 @@ pqinv/
 ```mermaid
 flowchart TD
     cmd["cmd/pqinv"] --> scan & classify & score & report
-    cmd --> tlsprobe & oidc & saml & repo & baseline
+    cmd --> tlsprobe & oidc & saml & repo & baseline & serve & pipeline
+    serve["internal/serve"] --> pipeline["internal/pipeline"] & baseline & scan
+    pipeline --> classify & score & report
     scan["internal/scan"] --> probe["internal/probe"]
     tlsprobe["probe/tlsprobe"] --> certs["probe/certs"] --> model
     oidc["probe/oidc"] --> model & probe
@@ -208,6 +214,12 @@ All renderers consume the same `[]TargetReport` (probe, target, error, score, gr
 
 `internal/scan` fans out over `targets.yaml` with `errgroup.SetLimit` as the concurrency bound. A failed target becomes a `Result` with `Err` set — a report entry, never a crashed scan — and results keep config order regardless of completion order. `--fail-on high|medium|low` exits 1 when findings at or above the threshold exist; unreachable targets always trip the gate, because "couldn't check" must never read as "all clear".
 
+### serve: the continuous half
+
+`pqinv serve` is the same pipeline on a ticker. `internal/serve.Server` holds the runner, the classifier and the targets; `Run` scans once immediately, then every interval, and keeps the latest `Snapshot` behind a mutex. Each scan is diffed against the previous one with the baseline package (or against `--baseline` for the first), so a regression in infrastructure is detected the same way as a regression in CI — and counted in `pqinv_new_findings_total`, which is the series to alert on.
+
+The exposition format is hand-written (`WriteMetrics`), which keeps the Prometheus client library out of the dependency set. Rules that matter: series are emitted in a fixed order; every urgency and class series is always present so a count dropping to zero is a value, not a gap; `pqinv_score` is **absent** for an unreachable target, never zero, for the same reason the JSON schema withholds it; whole numbers print without an exponent; label values are escaped per the format. `/report.json` serves the latest report in the public schema, so it doubles as the next `--baseline`. `cmd/` owns the process: signal handling, the HTTP listener, and a clean shutdown via errgroup.
+
 ### Baseline: a gate that can be turned on
 
 `--fail-on high` alone is red on day one for any endpoint without hybrid key exchange, so it gets disabled. `--baseline previous.json` (`internal/baseline`) loads an earlier JSON report and the gate counts only findings **not accounted for** in it. A finding's key is (probe, target, source, location, usage, algorithm, class, urgency); matching is a multiset difference, so two MD5s in a file against a baseline with one leaves one new finding. Class and urgency are in the key on purpose: a classical group that was Low behind a hybrid and is High after the hybrid was removed is a regression. Repo locations drop the line number: editing above a finding moves it, it does not create it. Unreachable targets still always fail. The gate error names the new findings (first ten). The baseline file is loaded before any probe runs — a bad path or a foreign JSON fails fast.
@@ -223,11 +235,13 @@ All renderers consume the same `[]TargetReport` (probe, target, error, score, gr
 - **score**: table tests shaped like the real calibration targets.
 - **report**: CBOM regression test for the cyclonedx-go converter bug; determinism assertions (no timestamp/serial).
 - **scan**: fake probes proving order preservation and failure isolation.
-- **cmd**: the gate with and without a baseline, the listing cap, port defaulting, config loading, and the `--ca-file`/`--insecure` client against a real `httptest` TLS server.
+- **pipeline**: order, failure isolation, and that correlation actually ran.
+- **serve**: fake probes (one that regresses between scans) driving the scheduler; every metric family asserted by exact series line, including absence of `pqinv_score` for unreachable targets, label escaping, number formatting, `/report.json` loading back as a baseline, `--baseline` applying to the first scan only, and the run loop stopping on cancel.
+- **cmd**: the gate with and without a baseline, the listing cap, port defaulting, config loading, the `--ca-file`/`--insecure` client against a real `httptest` TLS server, serve flag validation, and `runServe` binding a real port and shutting down on cancel.
 
 ## v2 sketch: the Kubernetes operator
 
-A second binary, `cmd/pqinv-operator/`, on controller-runtime: watch `Ingress` resources and `kubernetes.io/tls` Secrets, run the TLS/cert probes on a schedule, export `pqinv_score{target=…}` and `pqinv_findings{urgency=…}` as Prometheus metrics. Nothing in `internal/` needs to change — that constraint was enforced from day one. The likely stepping stone is `pqinv serve`: the same scheduled scan over a targets file, exposing Prometheus metrics without controller-runtime. Roadmap beyond that, with credit to prior art: SARIF output for the repo probe, an SSH probe (pqcscan has one), and passive PCAP analysis (pqcdump).
+A second binary, `cmd/pqinv-operator/`, on controller-runtime: watch `Ingress` resources and `kubernetes.io/tls` Secrets and turn them into targets for the `serve` loop, which already does the scheduling, the diffing and the metrics. The operator is therefore target discovery plus a `serve.Server` whose `Targets` can change — nothing in `internal/` needs to change beyond that, which is the constraint enforced from day one. Roadmap beyond that, with credit to prior art: SARIF output for the repo probe, an SSH probe (pqcscan has one), and passive PCAP analysis (pqcdump).
 
 ## Positioning
 

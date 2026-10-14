@@ -90,3 +90,27 @@ jobs:
             echo "gate must fail on a finding that is not in the baseline"; exit 1
           fi
           rm -rf zz_regression
+      - name: serve exposes metrics and shuts down cleanly
+        run: |
+          cat > "$RUNNER_TEMP/serve-targets.yaml" <<'YAML'
+          targets:
+            - probe: repo
+              target: .
+            - probe: tls
+              target: 127.0.0.1:1
+          YAML
+          ./pqinv serve --config "$RUNNER_TEMP/serve-targets.yaml" --interval 10s --listen 127.0.0.1:9465 --timeout 3s \
+            > "$RUNNER_TEMP/serve.log" 2>&1 &
+          pid=$!
+          for i in $(seq 1 30); do
+            curl -fs http://127.0.0.1:9465/healthz > /dev/null && break
+            sleep 1
+          done
+          curl -fs http://127.0.0.1:9465/metrics > "$RUNNER_TEMP/metrics.txt"
+          grep -q '^pqinv_score{probe="repo",target="."} ' "$RUNNER_TEMP/metrics.txt"
+          grep -q '^pqinv_target_unreachable{probe="tls",target="127.0.0.1:1"} 1$' "$RUNNER_TEMP/metrics.txt"
+          ! grep -q '^pqinv_score{probe="tls"' "$RUNNER_TEMP/metrics.txt"
+          curl -fs http://127.0.0.1:9465/report.json | python3 -m json.tool > /dev/null
+          kill -TERM "$pid"
+          wait "$pid" || true
+          cat "$RUNNER_TEMP/serve.log"

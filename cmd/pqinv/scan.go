@@ -12,11 +12,13 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 
 	"github.com/angga-22/pqinv/internal/baseline"
 	"github.com/angga-22/pqinv/internal/classify"
 	"github.com/angga-22/pqinv/internal/model"
+	"github.com/angga-22/pqinv/internal/pipeline"
 	"github.com/angga-22/pqinv/internal/probe"
 	"github.com/angga-22/pqinv/internal/probe/oidc"
 	"github.com/angga-22/pqinv/internal/probe/repo"
@@ -24,7 +26,6 @@ import (
 	"github.com/angga-22/pqinv/internal/probe/tlsprobe"
 	"github.com/angga-22/pqinv/internal/report"
 	"github.com/angga-22/pqinv/internal/scan"
-	"github.com/angga-22/pqinv/internal/score"
 )
 
 var (
@@ -175,19 +176,7 @@ var scanAllCmd = &cobra.Command{
 
 		runner := &scan.Runner{Probes: probes, Concurrency: flagConcurrency}
 		results := runner.Run(cmd.Context(), targets)
-
-		reports := make([]report.TargetReport, 0, len(results))
-		for _, res := range results {
-			if res.Err != nil {
-				reports = append(reports, report.TargetReport{
-					Probe: res.Target.Probe, Target: res.Target.Target,
-					Error: res.Err.Error(),
-				})
-				continue
-			}
-			reports = append(reports, buildReport(classifier, res.Target.Probe, res.Target.Target, res.Assets))
-		}
-		return emit(reports)
+		return emit(pipeline.Reports(classifier, results))
 	},
 }
 
@@ -231,18 +220,7 @@ func runSingle(cmd *cobra.Command, probeName, target string) error {
 	if err != nil {
 		return fmt.Errorf("load classification rules: %w", err)
 	}
-	return emit([]report.TargetReport{buildReport(classifier, probeName, target, assets)})
-}
-
-func buildReport(classifier *classify.Classifier, probeName, target string, assets []model.CryptoAsset) report.TargetReport {
-	model.SortAssets(assets)
-	verdicts := classify.Correlate(classifier.ClassifyAll(assets))
-	sc := score.Compute(verdicts)
-	return report.TargetReport{
-		Probe: probeName, Target: target,
-		Score: sc.Score, Grade: sc.Grade,
-		Verdicts: verdicts,
-	}
+	return emit([]report.TargetReport{pipeline.Report(classifier, probeName, target, assets)})
 }
 
 func emit(reports []report.TargetReport) error {
@@ -385,15 +363,21 @@ func newHTTPClient(caFile string, insecure bool) (*http.Client, error) {
 	return &http.Client{Transport: transport}, nil
 }
 
+// addProbeFlags registers the flags that shape how probes talk to the
+// world. `scan` and `serve` share them.
+func addProbeFlags(fs *pflag.FlagSet) {
+	fs.DurationVar(&flagTimeout, "timeout", 10*time.Second, "per-request timeout")
+	fs.IntVar(&flagConcurrency, "concurrency", 8, "max concurrent targets")
+	fs.StringVar(&flagCAFile, "ca-file", "", "PEM bundle of extra CA certificates trusted when fetching OIDC/SAML documents")
+	fs.BoolVar(&flagInsecure, "insecure", false, "skip TLS certificate verification when fetching OIDC/SAML documents")
+}
+
 func init() {
-	scanCmd.PersistentFlags().DurationVar(&flagTimeout, "timeout", 10*time.Second, "per-request timeout")
+	addProbeFlags(scanCmd.PersistentFlags())
 	scanCmd.PersistentFlags().StringVar(&flagFormat, "format", "pretty", "output format: pretty|json|cbom")
 	scanCmd.PersistentFlags().StringVar(&flagOut, "out", "", "write report to file instead of stdout")
-	scanCmd.PersistentFlags().IntVar(&flagConcurrency, "concurrency", 8, "max concurrent targets (scan all)")
 	scanCmd.PersistentFlags().StringVar(&flagFailOn, "fail-on", "", "exit 1 if findings at or above this urgency exist: high|medium|low")
 	scanCmd.PersistentFlags().StringVar(&flagBaseline, "baseline", "", "previous --format json report; with --fail-on, only findings new since it count")
-	scanCmd.PersistentFlags().StringVar(&flagCAFile, "ca-file", "", "PEM bundle of extra CA certificates trusted when fetching OIDC documents")
-	scanCmd.PersistentFlags().BoolVar(&flagInsecure, "insecure", false, "skip TLS certificate verification when fetching OIDC documents")
 	scanAllCmd.Flags().StringVar(&flagConfig, "config", "", "targets file (yaml)")
 	scanCmd.AddCommand(scanTLSCmd, scanOIDCCmd, scanSAMLCmd, scanRepoCmd, scanAllCmd)
 	rootCmd.AddCommand(scanCmd)

@@ -8,6 +8,37 @@ file as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-12
+
+The continuous half: what the CI gate does for code, `serve` does for the
+infrastructure that changes without a commit.
+
+### Added
+- `pqinv serve --config targets.yaml --interval 1h --listen :9465`: rescans
+  on a schedule and serves `/metrics` (Prometheus text exposition, written
+  by hand — no client library), `/report.json` (the public JSON schema, a
+  valid `--baseline` input) and `/healthz`.
+- Metrics: `pqinv_score` (absent while unreachable, never zero),
+  `pqinv_findings` by urgency and `pqinv_findings_by_class` (every series
+  always present), `pqinv_target_unreachable`, `pqinv_new_findings_total`
+  and `pqinv_new_findings_last_scan` (each scan diffed against the previous
+  one, or against `--baseline` for the first),
+  `pqinv_certificate_expiry_timestamp_seconds`, plus scan/exporter health.
+- New findings and unreachable targets are logged to stderr on every scan.
+- Clean shutdown on SIGINT/SIGTERM: in-flight handshakes and scrapes finish,
+  the listener closes.
+- `internal/pipeline`: the sort → classify → correlate → score path, now one
+  function shared by `scan` and `serve`.
+- README: metrics table and two Alertmanager rules (regression,
+  unreachable target).
+
+### Changed
+- `--timeout`, `--concurrency`, `--ca-file` and `--insecure` are shared
+  between `scan` and `serve`. Minimum `--interval` is 10s.
+- `.pqinvignore` now also lists the SAML algorithm-URI table and the x509
+  signature-hash table, which name every algorithm they map; the self-scan
+  is back to the three code-comment hits that regex cannot avoid.
+
 ## [0.3.0] - 2026-10-11
 
 A gate you can turn on today, and the whole identity plane in one scan.
@@ -122,7 +153,8 @@ Initial release.
 - `scan all --config targets.yaml` with bounded concurrency, and the
   `--fail-on high|medium|low` CI gate; unreachable targets always fail it.
 
-[Unreleased]: https://github.com/angga-22/pqinv/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/angga-22/pqinv/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/angga-22/pqinv/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/angga-22/pqinv/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/angga-22/pqinv/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/angga-22/pqinv/releases/tag/v0.1.0

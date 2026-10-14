@@ -1,9 +1,13 @@
-# Paths pqinv skips when scanning its own tree. The rule and pattern
-# files name every algorithm the tool detects, and the test tables do
-# the same — a regex scanner cannot tell a definition from a use, so
-# this file is how a repo tells it. Same syntax works in any repo you
-# scan: one Go path.Match glob per line; no slash = match the base name
-# anywhere; trailing slash = directories only.
+# Paths pqinv skips when scanning its own tree. These files are the
+# tool's knowledge: the rules, the regex patterns, the XML algorithm URI
+# table and the x509 signature-hash table name every algorithm the tool
+# detects, and the test tables do the same. A regex scanner cannot tell
+# a definition from a use, so this file is how a repo tells it. Same
+# syntax works in any repo you scan: one Go path.Match glob per line;
+# no slash = match the base name anywhere; trailing slash = directories
+# only.
 rules/rules.yaml
 internal/probe/repo/patterns.yaml
+internal/probe/saml/saml.go
+internal/probe/certs/certs.go
 *_test.go
